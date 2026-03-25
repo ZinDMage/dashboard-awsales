@@ -25,7 +25,25 @@ const qualifiedRanges = [
 const disqualifiedTicketVolumes = [
   'Menos de 1.000 por mês',
   'Entre 1.000 e 3.000 por mês',
-  'Entre 1.000 e 5.000 por mês'
+  'Entre 1.000 e 5.000 por mês',
+  'Entre 3.000 e 5.000 por mês' // Adicionar variação
+];
+
+// Volumes exclusivos para desqualificar E-commerce (< 10.000)
+const disqualifiedEcommerceVolumes = [
+  'Menos de 1.000 por mês',
+  'Entre 1.000 e 3.000 por mês',
+  'Entre 1.000 e 5.000 por mês',
+  'Entre 3.000 e 5.000 por mês',
+  'Entre 5.000 e 10.000 por mês' // E-commerce precisa > 10.000
+];
+
+// Volumes qualificados para E-commerce (> 10.000)
+const qualifiedEcommerceVolumes = [
+  'Acima de 10.000 por mês',
+  'Entre 10.000 e 50.000 por mês',
+  'Entre 50.000 e 100.000 por mês',
+  'Acima de 100.000 por mês'
 ];
 
 const disqualifiedSegments = [
@@ -33,11 +51,36 @@ const disqualifiedSegments = [
   '⚖️ Escritório de advocacia'
 ];
 
-function classifyLead(fat, vol, seg) {
-  if (disqualifiedRanges.includes(fat)) return 'Lead';
+/**
+ * Classifica um lead como 'Lead' ou 'MQL' baseado nas regras de negócio
+ * Regra especial: E-commerce precisa > 10.000 tickets/mês
+ *
+ * @param {string} fat - Faixa de faturamento
+ * @param {string} vol - Volume mensal de tickets
+ * @param {string} seg - Segmento do lead
+ * @param {string} market - Mercado do lead (para identificar E-commerce)
+ * @returns {string} 'MQL' ou 'Lead'
+ */
+function classifyLead(fat, vol, seg, market = null) {
+  // Regra 1: Faturamento desqualificado = Lead
+  if (!fat || disqualifiedRanges.includes(fat)) return 'Lead';
+
+  // Regra 2: Segmento desqualificado = Lead
   if (seg && disqualifiedSegments.includes(seg)) return 'Lead';
-  if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
+
+  // Regra 3: Volume com regra especial para E-commerce
+  if (market === '🛒 Ecommerce') {
+    // E-commerce: precisa > 10.000 tickets/mês
+    if (vol && disqualifiedEcommerceVolumes.includes(vol)) return 'Lead';
+    // Se não tem volume ou tem volume qualificado, continua
+  } else {
+    // Outros mercados: regra padrão
+    if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
+  }
+
+  // Regra 4: Se passou em tudo e tem faturamento qualificado = MQL
   if (qualifiedRanges.includes(fat)) return 'MQL';
+
   return 'Lead';
 }
 
@@ -298,7 +341,8 @@ export const fetchMonthlyMetrics = async () => {
         const classification = classifyLead(
           l.lead_revenue_range,
           l.lead_monthly_volume,
-          l.lead_segment
+          l.lead_segment,
+          l.lead_market // Adicionar market para regra E-commerce
         );
         if (classification === 'MQL') {
           updateMetrics(m, l, 1, 'n', 'mql', wk);
@@ -440,7 +484,7 @@ export const fetchMonthlyMetrics = async () => {
     const finalize = (m) => {
       const { g, n, p, f } = m;
       g.roi = g.gAds > 0 ? g.rec / g.gAds : 0;
-      g.mc = g.rec - (g.rec * 0.17) - m._churnTemp;
+      g.mc = g.rec - (g.rec * 0.095) - m._churnTemp;
       g.fatP = g.pipe * 0.2;
       g.recP = g.rec + g.fatP;
       g.tmf = g.vendas > 0 ? g.rec / g.vendas : 0;
