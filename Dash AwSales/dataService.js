@@ -191,7 +191,7 @@ export const fetchMonthlyMetrics = async () => {
       fetchAll('meta_ads_costs', 'spend, impressions, date_start'),
       fetchAll('google_ads_costs', 'spend, impressions, clicks, conversions, date'),
       fetchAll('meta_ads_actions', 'action_type, value, date_start'),
-      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment'),
+      fetchAll('yayforms_responses', 'submitted_at, lead_email, lead_revenue_range, lead_monthly_volume, lead_segment, lead_market'),
       fetchAll('crm_deals', 'deal_created_at, stage_id, status, value, custom_fields, person_email, won_time, deal_id, lost_reason'),
       fetchAll('crm_stage_transitions', 'deal_id, to_stage_id, time_in_previous_stage_sec')
     ]);
