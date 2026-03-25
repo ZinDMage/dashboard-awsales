@@ -53,35 +53,47 @@ const disqualifiedSegments = [
 
 /**
  * Classifica um lead como 'Lead' ou 'MQL' baseado nas regras de negócio
- * Regra especial: E-commerce precisa > 10.000 tickets/mês
+ * Implementa a mesma lógica da query SQL validada
+ *
+ * Regras:
+ * 1. Faturamento adequado (OBRIGATÓRIO)
+ * 2. Não pode ser clínica/advocacia
+ * 3. Volume com exceção para E-commerce:
+ *    - E-commerce: precisa > 10.000 tickets/mês
+ *    - Outros: precisa > 5.000 tickets/mês
+ *
+ * NULL em volume é tratado como OK (assume volume alto)
  *
  * @param {string} fat - Faixa de faturamento
- * @param {string} vol - Volume mensal de tickets
- * @param {string} seg - Segmento do lead
- * @param {string} market - Mercado do lead (para identificar E-commerce)
+ * @param {string} vol - Volume mensal de tickets (pode ser null)
+ * @param {string} seg - Segmento do lead (pode ser null)
+ * @param {string} market - Mercado do lead (pode ser null)
  * @returns {string} 'MQL' ou 'Lead'
  */
 function classifyLead(fat, vol, seg, market = null) {
-  // Regra 1: Faturamento desqualificado = Lead
+  // Regra 1: Faturamento adequado (OBRIGATÓRIO)
   if (!fat || disqualifiedRanges.includes(fat)) return 'Lead';
+  if (!qualifiedRanges.includes(fat)) return 'Lead';
 
-  // Regra 2: Segmento desqualificado = Lead
+  // Regra 2: Segmento permitido (clínica/advocacia são excluídos)
   if (seg && disqualifiedSegments.includes(seg)) return 'Lead';
 
   // Regra 3: Volume com regra especial para E-commerce
-  if (market === '🛒 Ecommerce') {
+  // NULL em volume conta como OK (assume volume adequado)
+  const isEcommerce = market === '🛒 Ecommerce';
+
+  if (isEcommerce) {
     // E-commerce: precisa > 10.000 tickets/mês
+    // NULL é OK, apenas volumes baixos (<10k) desqualificam
     if (vol && disqualifiedEcommerceVolumes.includes(vol)) return 'Lead';
-    // Se não tem volume ou tem volume qualificado, continua
   } else {
-    // Outros mercados: regra padrão
+    // Outros mercados: precisa > 5.000 tickets/mês
+    // NULL é OK, apenas volumes baixos (<5k) desqualificam
     if (vol && disqualifiedTicketVolumes.includes(vol)) return 'Lead';
   }
 
-  // Regra 4: Se passou em tudo e tem faturamento qualificado = MQL
-  if (qualifiedRanges.includes(fat)) return 'MQL';
-
-  return 'Lead';
+  // Passou em todas as regras = MQL
+  return 'MQL';
 }
 
 // ── Stage IDs do Pipedrive ─────────────────────────────────────
