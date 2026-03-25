@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
-import { fetchMonthlyMetrics } from "./dataService";
+import { fetchMonthlyMetrics, PIPELINE_FUNNELS } from "./dataService";
 import { supabase } from "./supabaseClient";
 
 const MESES = [
@@ -12,6 +12,69 @@ const SEMANAS = [
   { key: "s1", label: "S1" }, { key: "s2", label: "S2" }, { key: "s3", label: "S3" },
   { key: "s4", label: "S4" },
 ];
+
+const FUNNEL_LABELS = { inbound: "Inbound", indicacao: "Indicação", eventos: "Eventos", wordwild: "Word Wild", clinicas: "Clínicas" };
+// Só mostra funis com pelo menos um pipeline mapeado no dataService
+const FUNNELS = Object.entries(PIPELINE_FUNNELS)
+  .filter(([, ids]) => ids.length > 0)
+  .map(([key]) => ({ key, label: FUNNEL_LABELS[key] ?? key }));
+const ALL_FUNNELS = FUNNELS.map(f => f.key);
+
+function mergeMonthSlice(contrib, getSlice) {
+  const calcP = (num, den) => den > 0 ? num / den : 0;
+  const m = {
+    g: { rec: 0, gAds: 0, roi: 0, mc: 0, pipe: 0, fatP: 0, recP: 0, vendas: 0, tmf: 0 },
+    n: { imp: 0, cli: 0, vp: 0, ld: 0, mql: 0, sql: 0, rAg: 0, rRe: 0, v: 0 },
+    p: {}, f: { gAds: 0, cpL: 0, cpM: 0, cpS: 0, cpRA: 0, cpRR: 0, cpV: 0 },
+    dt: { ms: 0, sr: 0, rv: 0, lv: 0 },
+    perdas: { mql: [], sql: [], proposta: [] },
+    _churnTemp: 0, wk: {}
+  };
+  const dtCounts = { ms: 0, sr: 0, rv: 0, lv: 0 };
+  contrib.forEach(ds => {
+    const d = getSlice(ds);
+    if (!d) return;
+    ['rec', 'gAds', 'pipe', 'vendas'].forEach(k => m.g[k] += d.g?.[k] || 0);
+    Object.keys(m.n).forEach(k => m.n[k] += d.n?.[k] || 0);
+    m._churnTemp += d._churnTemp || 0;
+    ['ms', 'sr', 'rv', 'lv'].forEach(k => { if (d.dt?.[k] > 0) { m.dt[k] += d.dt[k]; dtCounts[k]++; } });
+    // Merge perdas: concatena os arrays já finalizados de todos os funis
+    ['mql', 'sql', 'proposta'].forEach(stage => {
+      if (d.perdas?.[stage]?.length) m.perdas[stage].push(...d.perdas[stage]);
+    });
+  });
+  ['ms', 'sr', 'rv', 'lv'].forEach(k => { m.dt[k] = dtCounts[k] > 0 ? Math.round(m.dt[k] / dtCounts[k]) : 0; });
+  m.g.roi = calcP(m.g.rec, m.g.gAds);
+  m.g.mc = m.g.rec - (m.g.rec * 0.095) - m._churnTemp;
+  m.g.fatP = m.g.pipe * 0.2; m.g.recP = m.g.rec + m.g.fatP;
+  m.g.tmf = calcP(m.g.rec, m.g.vendas); m.f.gAds = m.g.gAds;
+  m.p = {
+    ctr: calcP(m.n.cli, m.n.imp), cr: calcP(m.n.vp, m.n.cli), cc: calcP(m.n.ld, m.n.vp),
+    qm: calcP(m.n.mql, m.n.ld), qs: calcP(m.n.sql, m.n.mql),
+    ag: calcP(m.n.rAg, m.n.sql), su: calcP(m.n.rRe, m.n.rAg),
+    fc: calcP(m.n.v, m.n.rRe), fs: calcP(m.n.v, m.n.sql)
+  };
+  m.f.cpL = calcP(m.f.gAds, m.n.ld); m.f.cpM = calcP(m.f.gAds, m.n.mql);
+  m.f.cpS = calcP(m.f.gAds, m.n.sql); m.f.cpRA = calcP(m.f.gAds, m.n.rAg);
+  m.f.cpRR = calcP(m.f.gAds, m.n.rRe); m.f.cpV = calcP(m.f.gAds, m.n.v);
+  return m;
+}
+
+function mergeFunnelData(datasets) {
+  const allKeys = [...new Set(datasets.flatMap(ds => Object.keys(ds)))];
+  const merged = {};
+  allKeys.forEach(mk => {
+    const contrib = datasets.filter(ds => ds[mk]);
+    if (!contrib.length) return;
+    const m = mergeMonthSlice(contrib, ds => ds[mk]);
+    // Merge weekly data
+    ['s1', 's2', 's3', 's4'].forEach(wk => {
+      m.wk[wk] = mergeMonthSlice(contrib, ds => ds[mk]?.wk?.[wk]);
+    });
+    merged[mk] = m;
+  });
+  return merged;
+}
 
 // The ALL constant is now replaced by the 'data' state within the Dashboard component.
 
@@ -187,13 +250,13 @@ export default function Dashboard({ session }) {
     colorGood: "#34C759",
     colorBad: "#FF453A"
   });
-  const [data, setData] = useState(null);
+  const [rawData, setRawData] = useState(null);
+  const [selectedFunnels, setSelectedFunnels] = useState(ALL_FUNNELS);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     fetchMonthlyMetrics()
       .then(res => {
-        setData(res);
+        setRawData(res);
         setLoading(false);
       })
       .catch(err => {
@@ -201,6 +264,22 @@ export default function Dashboard({ session }) {
         setLoading(false);
       });
   }, []);
+
+  const togFunnel = useCallback(k => setSelectedFunnels(p => p.includes(k) ? (p.length > 1 ? p.filter(f => f !== k) : p) : [...p, k]), []);
+
+  const [viewMode, setViewMode] = useState("performance"); // "performance" | "criacao"
+
+  const data = useMemo(() => {
+    if (!rawData) return null;
+    const source = rawData[viewMode];
+    if (!source) return null;
+    // "Todos" selecionados → usa source.all diretamente (fonte de verdade, evita dupla contagem)
+    if (selectedFunnels.length === ALL_FUNNELS.length) return source.all;
+    const datasets = selectedFunnels.map(k => source.funnels?.[k]).filter(Boolean);
+    if (!datasets.length) return source.all;
+    if (datasets.length === 1) return datasets[0];
+    return mergeFunnelData(datasets);
+  }, [rawData, selectedFunnels, viewMode]);
 
   const togC = useCallback(id => setColl(p => ({ ...p, [id]: !p[id] })), []);
   const togMM = useCallback(k => setMM(p => p.includes(k) ? (p.length > 1 ? p.filter(m => m !== k) : p) : [...p, k]), []);
@@ -251,7 +330,7 @@ export default function Dashboard({ session }) {
         ],
       },
       row2rest: [
-        { l: "Vendas", v: F.n(aggData.n.v), d: dlt(cur?.n.v, prev?.n.v), sub: "Fechamentos do período", ico: "#" },
+        { l: "Vendas", v: F.n(aggData.g.vendas), d: dlt(cur?.g.vendas, prev?.g.vendas), sub: "Fechamentos do período", ico: "#" },
         { l: "Ticket Médio", v: F.ri(aggData.g.tmf), d: dlt(cur?.g.tmf, prev?.g.tmf), sub: "Ticket médio", ico: "💰" },
       ],
     };
@@ -304,19 +383,16 @@ export default function Dashboard({ session }) {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         
         {/* ═══ Header Global ═══ */}
-        <div style={{ height: 60, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", borderBottom: `1px solid ${bdrLight}`, background: "var(--color-background-primary)", zIndex: 10 }}>
-          <div onClick={() => setSidebarOpen(!sidebarOpen)} style={{ cursor: "pointer", color: "var(--color-text-tertiary)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, transition: "background 0.2s" }} onMouseEnter={e => e.currentTarget.style.background = bdrLight} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>{Icons.sidebar}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, paddingRight: 16, borderRight: `1px solid ${bdrLight}` }}>
-               <div style={{ textAlign: "right" }}>
-                 <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-tertiary)", letterSpacing: "0.05em" }}>LOGADO COMO</div>
-                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)" }}>{session?.user?.email || "usuario@fyntrainc.com"}</div>
-               </div>
-               <div style={{ width: 32, height: 32, borderRadius: 16, background: "#0D6EFD", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 12, fontWeight: 700 }}>{session?.user?.email ? session.user.email.substring(0, 2).toUpperCase() : "AW"}</div>
+        <div style={{ height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", borderBottom: `1px solid ${bdrLight}`, background: "var(--color-background-primary)", zIndex: 10, gap: 16 }}>
+          <div onClick={() => setSidebarOpen(!sidebarOpen)} style={{ cursor: "pointer", color: "var(--color-text-tertiary)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, flexShrink: 0, transition: "background 0.2s" }} onMouseEnter={e => e.currentTarget.style.background = bdrLight} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>{Icons.sidebar}</div>
+          <div style={{ flex: 1 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--color-text-tertiary)", letterSpacing: "0.05em" }}>LOGADO COMO</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)" }}>{session?.user?.email || "usuario@fyntrainc.com"}</div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div onClick={() => supabase.auth.signOut()} style={{ cursor: "pointer", color: "var(--color-text-primary)", width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 18, transition: "background 0.2s" }} title="Sair" onMouseEnter={e => e.currentTarget.style.background = "rgba(255,69,58,0.1)"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>{Icons.logout}</div>
-            </div>
+            <div style={{ width: 32, height: 32, borderRadius: 16, background: "#0D6EFD", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 12, fontWeight: 700 }}>{session?.user?.email ? session.user.email.substring(0, 2).toUpperCase() : "AW"}</div>
+            <div onClick={() => supabase.auth.signOut()} style={{ cursor: "pointer", color: "var(--color-text-tertiary)", width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 16, transition: "background 0.2s" }} title="Sair" onMouseEnter={e => e.currentTarget.style.background = "rgba(255,69,58,0.1)"} onMouseLeave={e => e.currentTarget.style.background = "transparent"}>{Icons.logout}</div>
           </div>
         </div>
 
@@ -335,39 +411,58 @@ export default function Dashboard({ session }) {
             {(currentView === "metricas" || currentView === "config") && (
               <>
                 {/* ═══ Dashboard Topbar ═══ */}
-                <div style={{ display: currentView === "metricas" ? "flex" : "none", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+                <div style={{ display: currentView === "metricas" ? "flex" : "none", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
                   <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-text-primary)", letterSpacing: "-0.02em" }}>Métricas</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2, marginRight: 10 }}>
-            {["2025", "2026"].map(y => (
-              <Pill key={y} active={year === y} onClick={() => setYear(y)}>{y}</Pill>
-            ))}
-          </div>
-          <div onClick={() => setHeat(!heat)} style={{
-            display: "flex", alignItems: "center", gap: 6, cursor: "pointer", userSelect: "none",
-            padding: "5px 12px", borderRadius: 20,
-            background: heat ? (dk ? "rgba(52,199,89,0.15)" : "rgba(52,199,89,0.1)") : "var(--color-background-secondary)",
-            transition: "all 0.2s",
-          }}>
-            <div style={{ width: 28, height: 16, borderRadius: 8, position: "relative", background: heat ? "#34C759" : "var(--color-border-secondary)", transition: "background 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-              <div style={{ width: 12, height: 12, borderRadius: 6, background: "#fff", position: "absolute", top: 2, left: heat ? 14 : 2, transition: "left 0.25s cubic-bezier(0.4,0,0.2,1)" }} />
-            </div>
-            <span style={{ fontSize: 11, color: heat ? "#34C759" : "var(--color-text-tertiary)", fontWeight: 500 }}>Heatmap</span>
-          </div>
-          <div style={{ display: "inline-flex", borderRadius: 20, padding: 2, background: "var(--color-background-secondary)" }}>
-            {[{ k: "single", l: "1 Mês" }, { k: "multi", l: "Multi-mês" }, { k: "semanas", l: "Semanas" }].map(m => (
-              <button key={m.k} onClick={() => setMode(m.k)} style={{
-                padding: "5px 16px", fontSize: 12, borderRadius: 18, border: "none", cursor: "pointer",
-                fontWeight: mode === m.k ? 600 : 400,
-                background: mode === m.k ? "var(--color-background-primary)" : "transparent",
-                color: mode === m.k ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
-                boxShadow: mode === m.k ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                transition: "all 0.2s cubic-bezier(0.4,0,0.2,1)",
-              }}>{m.l}</button>
-            ))}
-          </div>
-        </div>
-      </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    {/* Ano */}
+                    <div style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2 }}>
+                      {["2025", "2026"].map(y => <Pill key={y} active={year === y} onClick={() => setYear(y)}>{y}</Pill>)}
+                    </div>
+                    <div style={{ width: 1, height: 20, background: bdrLight, margin: "0 2px" }} />
+                    {/* Performance / Criação */}
+                    <div style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2 }}>
+                      {[{ k: "performance", l: "Performance" }, { k: "criacao", l: "Criação" }].map(vm => (
+                        <Pill key={vm.k} active={viewMode === vm.k} onClick={() => setViewMode(vm.k)}>{vm.l}</Pill>
+                      ))}
+                    </div>
+                    <div style={{ width: 1, height: 20, background: bdrLight, margin: "0 2px" }} />
+                    {/* Funil */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--color-text-tertiary)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Funil</span>
+                      <div style={{ display: "flex", background: "var(--color-background-secondary)", borderRadius: 20, padding: 2, gap: 1 }}>
+                        <Pill active={selectedFunnels.length === ALL_FUNNELS.length} onClick={() => setSelectedFunnels(ALL_FUNNELS)}>Todos</Pill>
+                        {FUNNELS.map(f => <Pill key={f.key} active={selectedFunnels.includes(f.key)} onClick={() => togFunnel(f.key)}>{f.label}</Pill>)}
+                      </div>
+                    </div>
+                    <div style={{ width: 1, height: 20, background: bdrLight, margin: "0 2px" }} />
+                    {/* Modo */}
+                    <div style={{ display: "inline-flex", borderRadius: 20, padding: 2, background: "var(--color-background-secondary)" }}>
+                      {[{ k: "single", l: "1 Mês" }, { k: "multi", l: "Multi-mês" }, { k: "semanas", l: "Semanas" }].map(m => (
+                        <button key={m.k} onClick={() => setMode(m.k)} style={{
+                          padding: "5px 14px", fontSize: 12, borderRadius: 18, border: "none", cursor: "pointer",
+                          fontWeight: mode === m.k ? 600 : 400,
+                          background: mode === m.k ? "var(--color-background-primary)" : "transparent",
+                          color: mode === m.k ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
+                          boxShadow: mode === m.k ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+                          transition: "all 0.2s cubic-bezier(0.4,0,0.2,1)",
+                        }}>{m.l}</button>
+                      ))}
+                    </div>
+                    <div style={{ width: 1, height: 20, background: bdrLight, margin: "0 2px" }} />
+                    {/* Heatmap */}
+                    <div onClick={() => setHeat(!heat)} style={{
+                      display: "flex", alignItems: "center", gap: 6, cursor: "pointer", userSelect: "none",
+                      padding: "5px 12px", borderRadius: 20,
+                      background: heat ? (dk ? "rgba(52,199,89,0.15)" : "rgba(52,199,89,0.1)") : "var(--color-background-secondary)",
+                      transition: "all 0.2s",
+                    }}>
+                      <div style={{ width: 28, height: 16, borderRadius: 8, position: "relative", background: heat ? "#34C759" : "var(--color-border-secondary)", transition: "background 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
+                        <div style={{ width: 12, height: 12, borderRadius: 6, background: "#fff", position: "absolute", top: 2, left: heat ? 14 : 2, transition: "left 0.25s cubic-bezier(0.4,0,0.2,1)" }} />
+                      </div>
+                      <span style={{ fontSize: 11, color: heat ? "#34C759" : "var(--color-text-tertiary)", fontWeight: 500 }}>Heatmap</span>
+                    </div>
+                  </div>
+                </div>
 
       {/* ═══ Month selectors ═══ */}
       {currentView === "metricas" && (
@@ -377,6 +472,7 @@ export default function Dashboard({ session }) {
           {mode === "semanas" && <div><div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginBottom: 6, fontWeight: 500 }}>Semanas do mês selecionado</div><div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>{MESES.map(m => <Pill key={m.key} active={wM === m.key} onClick={() => setWM(m.key)}>{m.label}</Pill>)}</div></div>}
         </div>
       )}
+
 
       {/* ═══ KPI Cards ou Settings Panel ═══ */}
       {(() => {
